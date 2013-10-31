@@ -105,12 +105,23 @@ class TemporaryEtcdServer:
         self.etcd.terminate()
         shutil.rmtree(self.root)
 
+class TemporaryPieholeDaemon:
+    def __init__ (self):
+        self.daemon = subprocess.Popen("piehole.py daemon", shell=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def cleanup(self):
+        self.daemon.stdout.close()
+        self.daemon.stderr.close()
+        self.daemon.terminate()
+
 
 class PieholeTest(unittest.TestCase):
     def setUp(self):
         os.environ['PATH'] = "%s:%s" % (os.getcwd(), os.environ['PATH'])
         shutil.rmtree('__pycache__', ignore_errors=True)
         self.etcd = TemporaryEtcdServer()
+        self.pieholed = TemporaryPieholeDaemon()
         self.repoa = TemporaryGitRepo("--bare")
         self.repob = TemporaryGitRepo("--bare")
         self.workrepo = TemporaryGitRepo()
@@ -123,6 +134,7 @@ class PieholeTest(unittest.TestCase):
 
     def tearDown(self):
         self.etcd.cleanup()
+        self.pieholed.cleanup()
         self.repoa.cleanup()
         self.repob.cleanup()
         self.workrepo.cleanup()
@@ -145,6 +157,14 @@ class PieholeTest(unittest.TestCase):
             with in_directory(self.repoa):
                 run('chmod 400 hooks/update')
                 run("piehole.py check")
+
+    def test_daemon_down(self):
+        self.workrepo.commit()
+        self.pieholed.cleanup()
+        try:
+            self.workrepo.push('a')
+        except GitFailure as err:
+            self.assertIn('Cannot connect to piehole daemon', str(error))
 
     def test_basics(self):
         for i in range(3):

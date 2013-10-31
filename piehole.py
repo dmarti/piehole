@@ -9,6 +9,7 @@ Replicate Git repositories using etcd.
 
 import argparse
 import filecmp
+import http.server
 import json
 import locale
 import logging
@@ -23,6 +24,7 @@ GIT = '/usr/bin/git'
 CONFIG_PREFIX = 'piehole'
 ETCD_PREFIX = 'piehole'
 ETCD_ROOT = 'http://127.0.0.1:4001'
+DAEMON_PORT = 3690
 BLANK = '0000000000000000000000000000000000000000' # don't change
 logging.basicConfig(level=logging.DEBUG,
                     format="piehole %(levelname)s: %(message)s")
@@ -31,8 +33,23 @@ def fail(message):
     logging.error(message)
     sys.exit(1)
 
+
+class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        logging.debug('GET')
+        self.send_response(204)
+        self.end_headers()
+
+
+def start_daemon():
+   serveraddr = ('127.0.0.1', DAEMON_PORT)
+   daemon = http.server.HTTPServer(serveraddr, TransferRequestHandler)
+   daemon.serve_forever()
+
+
 class GitFailure(Exception):
     pass
+
 
 def run_git(*args):
     lines = []
@@ -133,6 +150,13 @@ def sanity_check(installed=True):
     #TODO check that repo has permissions for the piehole group
     except GitFailure as e:
         fail("%s does not seem to be a Git repository" % os.getcwd())
+    try:
+        loc = "http://127.0.0.1:%s" % DAEMON_PORT
+        res = urllib.request.urlopen(loc)
+        if res.read() != b'':
+            fail("Error communicating with daemon")
+    except:
+        fail("Cannot connect to piehole daemon")
     for item in ('etcdprefix', 'etcdroot', 'repourl', 'repogroup'):
         if installed and not config(item):
             fail("%s.%s not set" % (CONFIG_PREFIX, item))
@@ -188,6 +212,7 @@ def install(repogroup, repourl, etcdroot, etcdprefix):
         logging.warning("Using %s for repo URL." % repourl)
         logging.warning("You probably want an ssh URL instead.")
     add_to_repogroup()
+
 
 def start_transfer(ref, command):
     '''
@@ -268,9 +293,11 @@ if __name__ == '__main__':
                             help="etcd root", default=ETCD_ROOT)
     parser.add_argument("--etcdprefix",
                             help="prefix for etcd keys", default=ETCD_PREFIX)
-    parser.add_argument("command", choices=['help', 'install', 'check'],
+    parser.add_argument("command", choices=['help', 'install', 'check', 'daemon'],
                             help="command")
     args = parser.parse_args()
+    if args.command == 'daemon':
+        start_daemon()
     if args.command == 'install':
         install(args.repogroup, args.repourl, args.etcdroot, args.etcdprefix)
     elif args.command == 'check':
