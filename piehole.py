@@ -271,11 +271,13 @@ if __name__ == '__main__':
     parser.add_argument("command", choices=['help', 'install', 'check'],
                             help="command")
     args = parser.parse_args()
-    #TODO: daemon command
     if args.command == 'install':
         install(args.repogroup, args.repourl, args.etcdroot, args.etcdprefix)
     elif args.command == 'check':
         sanity_check()
+        #TODO: check that refs here match etcd
     else:
         parser.print_help()
     #TODO: add commands to let you run piehole from existing hook scripts?
+    #TODO: reset command to reset etcd state to match this repo/ref
+    #TODO: daemon command
