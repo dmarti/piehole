@@ -130,6 +130,7 @@ def sanity_check(installed=True):
     try:
         if config('core.bare') != 'true':
             fail("%s is not a bare Git repository." % os.getcwd())
+    #TODO check that repo has permissions for the piehole group
     except GitFailure as e:
         fail("%s does not seem to be a Git repository" % os.getcwd())
     for item in ('etcdprefix', 'etcdroot', 'repourl', 'repogroup'):
@@ -241,8 +242,14 @@ def update():
     oldval = '' if old == BLANK else old
     if etcd_write("%s %s" % (repogroup, ref), new, oldval):
         logging.info("Updating %s from %s to %s." % (ref, old, new))
+        #TODO: tell daemon to start a push
         sys.exit(0)
-    start_transfer(ref, 'fetch')
+    try:
+        run_git('update-ref', ref, current)
+        logging.info("Setting %s to known commit %s" % (ref, current))
+    except GitFailure:
+        start_transfer(ref, 'fetch')
+        logging.info("Started fetch of %s" % ref)
     logging.warning("Failed to update %s. Replication in progress." % ref)
     logging.warning("Please try your push again.")
     sys.exit(1)
@@ -264,6 +271,7 @@ if __name__ == '__main__':
     parser.add_argument("command", choices=['help', 'install', 'check'],
                             help="command")
     args = parser.parse_args()
+    #TODO: daemon command
     if args.command == 'install':
         install(args.repogroup, args.repourl, args.etcdroot, args.etcdprefix)
     elif args.command == 'check':

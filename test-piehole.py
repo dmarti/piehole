@@ -221,10 +221,24 @@ class PieholeTest(unittest.TestCase):
     def test_tag(self):
         self.workrepo.commit()
         self.workrepo.run_git('tag', 'fun')
-        # self.assertIn('Accepting replication', self.workrepo.push('a'))
         self.assertIn('Accepting replication', self.workrepo.push('a', 'fun'))
         self.assertIn('fun', self.repob.run_git('tag'))
-       
+
+    def test_overrun_push(self):
+        self.workrepo.commit()
+        self.workrepo.push('a')
+        current = self.workrepo.last_commit()
+        self.workrepo.commit()
+        self.workrepo.push('a')
+        with in_directory(self.repoa):
+            etcd_write('pieholetest refs/heads/master', current)
+        self.workrepo.commit()
+        try:
+            self.workrepo.push('a')
+        except GitFailure as err:
+            self.assertIn('Setting refs/heads/master to known commit', str(err))
+        self.assertIn('Accepting replication', self.workrepo.push('a'))
+
 
 if __name__ == '__main__':
     unittest.main()
