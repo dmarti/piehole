@@ -15,6 +15,7 @@ import locale
 import logging
 import os
 import shutil
+import socketserver
 import subprocess
 import sys
 import time
@@ -33,17 +34,23 @@ def fail(message):
     logging.error(message)
     sys.exit(1)
 
+class ForkingHTTPServer(socketserver.ForkingMixIn, http.server.HTTPServer):
+    pass
 
 class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        logging.debug('GET')
-        self.send_response(204)
+    def do_POST(self):
+        out = ""
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset="UTF-8"')
+        self.send_header('Content-length', str(len(out)))
         self.end_headers()
+        self.wfile.write(out.encode('utf-8'))
+        logging.debug(self)
 
 
 def start_daemon():
    serveraddr = ('127.0.0.1', DAEMON_PORT)
-   daemon = http.server.HTTPServer(serveraddr, TransferRequestHandler)
+   daemon = ForkingHTTPServer(serveraddr, TransferRequestHandler)
    daemon.serve_forever()
 
 
@@ -151,8 +158,9 @@ def sanity_check(installed=True):
     except GitFailure as e:
         fail("%s does not seem to be a Git repository" % os.getcwd())
     try:
+        postdata = urllib.parse.urlencode({'action': 'ping'}).encode('ascii')
         loc = "http://127.0.0.1:%s" % DAEMON_PORT
-        res = urllib.request.urlopen(loc)
+        res = urllib.request.urlopen(loc, postdata)
         if res.read() != b'':
             fail("Error communicating with daemon")
     except:
