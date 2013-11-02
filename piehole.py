@@ -8,6 +8,7 @@ Replicate Git repositories using etcd.
 '''
 
 import argparse
+import cgi
 import filecmp
 import http.server
 import json
@@ -19,6 +20,7 @@ import socketserver
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 GIT = '/usr/bin/git'
@@ -30,6 +32,13 @@ BLANK = '0000000000000000000000000000000000000000' # don't change
 logging.basicConfig(level=logging.DEBUG,
                     format="piehole %(levelname)s: %(message)s")
 
+class GitFailure(Exception):
+    pass
+
+class SanityCheckFailure(Exception):
+    pass
+
+
 def fail(message):
     logging.error(message)
     sys.exit(1)
@@ -39,24 +48,44 @@ class ForkingHTTPServer(socketserver.ForkingMixIn, http.server.HTTPServer):
 
 class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        out = ""
-        self.send_response(200)
+        try:
+            ctype, pdict = cgi.parse_header(
+                self.headers.get('content-type'))
+            if ctype != 'application/x-www-form-urlencoded':
+                raise Exception("bad content type")
+            length = int(self.headers.get('content-length'))
+            content = self.rfile.read(length).decode('utf-8')
+            params = urllib.parse.parse_qs(content)
+            os.chdir(params['repo'][0])
+            sanity_check()
+            command = params['command'][0]
+            if command == 'ping':
+                pass
+            else:
+                ref = params['ref'][0]
+                start_transfer(ref, command)
+            out = ''
+            code = 200
+        except SanityCheckFailure as err:
+            out = str(err) + "\n"
+            code = 400
+        except Exception as err:
+            out = str(err) + "\n"
+            code = 500
+
+        self.send_response(code)
         self.send_header('Content-type', 'text/plain; charset="UTF-8"')
         self.send_header('Content-length', str(len(out)))
         self.end_headers()
         self.wfile.write(out.encode('utf-8'))
-        logging.debug(self)
-
+        if code == 200 and command and ref:
+            start_transfer(ref, command)
 
 def start_daemon():
    serveraddr = ('127.0.0.1', DAEMON_PORT)
+   # os.chdir('/tmp')
    daemon = ForkingHTTPServer(serveraddr, TransferRequestHandler)
    daemon.serve_forever()
-
-
-class GitFailure(Exception):
-    pass
-
 
 def run_git(*args):
     lines = []
@@ -150,33 +179,40 @@ def etcd_write(key, value, prev=None):
         logging.debug(data.get('cause'))
         return False
 
+def invoke_daemon(repo, ref, action):
+    params = {'repo': repo, 'ref': ref, 'action': action}
+    try:
+        postdata = urllib.parse.urlencode(params).encode('ascii')
+        loc = "http://127.0.0.1:%s" % DAEMON_PORT
+        res = urllib.request.urlopen(loc, postdata)
+        content = res.read().decode('utf-8')
+        if res.read() == '':
+            return True
+        else:
+            raise NotImplementedError(content)
+    except urllib.error.HTTPError as err:
+        logging.error(err.reason)
+        raise
+
 def sanity_check(installed=True):
     try:
         if config('core.bare') != 'true':
-            fail("%s is not a bare Git repository." % os.getcwd())
+            raise SanityCheckFailure("%s is not a bare Git repository." % os.getcwd())
     #TODO check that repo has permissions for the piehole group
     except GitFailure as e:
-        fail("%s does not seem to be a Git repository" % os.getcwd())
-    try:
-        postdata = urllib.parse.urlencode({'action': 'ping'}).encode('ascii')
-        loc = "http://127.0.0.1:%s" % DAEMON_PORT
-        res = urllib.request.urlopen(loc, postdata)
-        if res.read() != b'':
-            fail("Error communicating with daemon")
-    except:
-        fail("Cannot connect to piehole daemon")
+        raise SanityCheckFailure("%s does not seem to be a Git repository" % os.getcwd())
     if installed and config('core.logAllRefUpdates') != 'true':
-        fail("core.logAllRefUpdates is off")
+        raise SanityCheckFailure("core.logAllRefUpdates is off")
     for item in ('etcdprefix', 'etcdroot', 'repourl', 'repogroup'):
         if installed and not config(item):
-            fail("%s.%s not set" % (CONFIG_PREFIX, item))
+            raise SanityCheckFailure("%s.%s not set" % (CONFIG_PREFIX, item))
     for hook in ('update', 'post-update'):
         path = os.path.join(reporoot(), 'hooks', hook)
-        if os.path.isfile(path):
+        if os.path.isfile(path) and os.path.isfile(__file__):
             if not filecmp.cmp(__file__, path):
-                fail("Hook already exists at %s" % path)
+                raise SanityCheckFailure("Hook already exists at %s" % path)
             if not os.access(path, os.X_OK):
-                fail("%s is not executable" % path)
+                raise SanityCheckFailure("%s is not executable" % path)
 
 def repogroup_members():
     members = etcd_read(config('repogroup'))
@@ -224,7 +260,7 @@ def install(repogroup, repourl, etcdroot, etcdprefix):
         logging.warning("You probably want an ssh URL instead.")
     add_to_repogroup()
 
-
+@register
 def start_transfer(ref, command):
     '''
     Start transferring objects to or from the repos
@@ -235,7 +271,8 @@ def start_transfer(ref, command):
     forwarding to the other servers, and can return
     from the original push faster.
     '''
-    #TODO: break out into a separate process
+    if command not in ['fetch', 'push']:
+        raise NotImplementedError("Unknown command: %s" % command)
     here = config('repourl')
     if ref.startswith('refs/heads/'):
         refname = ref[11:]
@@ -261,6 +298,7 @@ def post_update():
     '''
     for ref in sys.argv[1:]:
         start_transfer(ref, 'push')
+        # invoke_daemon(reporoot(), ref, 'push')
     sys.exit(0)
 
 @register
@@ -278,12 +316,13 @@ def update():
     oldval = '' if old == BLANK else old
     if etcd_write("%s %s" % (repogroup, ref), new, oldval):
         logging.info("Updating %s from %s to %s." % (ref, old, new))
-        #TODO: tell daemon to start a push
+        # invoke_daemon(reporoot(), ref, 'push')
         sys.exit(0)
     try:
         run_git('update-ref', ref, current)
         logging.info("Setting %s to known commit %s" % (ref, current))
     except GitFailure:
+        # invoke_daemon(reporoot(), ref, 'push')
         start_transfer(ref, 'fetch')
         logging.info("Started fetch of %s" % ref)
     logging.warning("Failed to update %s. Replication in progress." % ref)
@@ -312,10 +351,16 @@ if __name__ == '__main__':
     if args.command == 'install':
         install(args.repogroup, args.repourl, args.etcdroot, args.etcdprefix)
     elif args.command == 'check':
-        sanity_check()
+        try:
+            sanity_check()
+        except SanityCheckFailure as err:
+            fail(str(err))
+        try:
+            invoke_daemon(reporoot(), 'master', 'ping')
+        except:
+            fail("Cannot connect to piehole daemon")
         #TODO: check that refs here match etcd
     else:
         parser.print_help()
     #TODO: add commands to let you run piehole from existing hook scripts?
     #TODO: reset command to reset etcd state to match this repo/ref
-    #TODO: daemon command

@@ -179,13 +179,21 @@ class PieholeTest(unittest.TestCase):
         except GitFailure as err:
             self.assertIn('Cannot connect to piehole daemon', str(err))
 
+    def test_daemon(self):
+        self.workrepo.commit()
+        self.workrepo.push('a')
+        with in_directory(self.repoa):
+            for command in ['push', 'fetch']:
+                self.assertEqual(b'', run("curl -s -d repo=%s -d command=%s -d ref=refs/heads/master http://localhost:3690" % (self.repoa.root, command))) 
+
     def test_basics(self):
         for i in range(3):
             self.workrepo.commit()
             self.assertEqual(i+1, len(self.workrepo.log()))
             last = self.workrepo.last_commit()
-            self.assertIn('Accepting replication', self.workrepo.push('a'))
+            self.assertIn('Updating', self.workrepo.push('a'))
             self.assertEqual(last, self.repoa.last_commit())
+            time.sleep(2)
             self.assertEqual(last, self.repob.last_commit())
     
     def test_register(self):
