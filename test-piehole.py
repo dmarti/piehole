@@ -158,6 +158,13 @@ class PieholeTest(unittest.TestCase):
                 run('date > hooks/update')
                 run("piehole.py install")
 
+    def test_reflog_config(self):
+         with in_directory(self.repoa):
+             run('git config --local core.logAllRefUpdates false')
+             with self.assertRaisesRegex(RunError,
+                                         'core.logAllRefUpdates is off'):
+                 run('piehole.py check')
+
     def test_bad_hook_perms(self):
         with self.assertRaisesRegex(RunError, 'not executable'):
             with in_directory(self.repoa):

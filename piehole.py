@@ -165,6 +165,8 @@ def sanity_check(installed=True):
             fail("Error communicating with daemon")
     except:
         fail("Cannot connect to piehole daemon")
+    if installed and config('core.logAllRefUpdates') != 'true':
+        fail("core.logAllRefUpdates is off")
     for item in ('etcdprefix', 'etcdroot', 'repourl', 'repogroup'):
         if installed and not config(item):
             fail("%s.%s not set" % (CONFIG_PREFIX, item))
@@ -212,6 +214,7 @@ def install(repogroup, repourl, etcdroot, etcdprefix):
         path = os.path.join(reporoot(), 'hooks', hook)
         shutil.copyfile(__file__, path)
         os.chmod(path, 0o755)
+    config('core.logAllRefUpdates', 'true')
     config('etcdroot', etcdroot)
     config('etcdprefix', etcdprefix)
     config('repogroup', repogroup)
