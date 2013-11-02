@@ -23,7 +23,8 @@ class RunError(Exception):
 
 def run(command):
     try:
-        return subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
+        return subprocess.check_output(command,
+                                       shell=True, stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError as err:
         raise RunError(err.output.decode('utf-8'))
 
@@ -103,17 +104,22 @@ class TemporaryEtcdServer:
         self.etcd.stdout.close()
         self.etcd.stderr.close()
         self.etcd.terminate()
+        self.etcd.wait()
         shutil.rmtree(self.root)
+
 
 class TemporaryPieholeDaemon:
     def __init__ (self):
         self.daemon = subprocess.Popen("piehole.py daemon", shell=True,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.returncode = None
 
     def cleanup(self):
-        self.daemon.stdout.close()
-        self.daemon.stderr.close()
-        self.daemon.terminate()
+        if self.returncode is not None:
+            self.daemon.stdout.close()
+            self.daemon.stderr.close()
+            self.daemon.terminate()
+            self.returncode = self.daemon.wait()
 
 
 class PieholeTest(unittest.TestCase):
@@ -164,7 +170,7 @@ class PieholeTest(unittest.TestCase):
         try:
             self.workrepo.push('a')
         except GitFailure as err:
-            self.assertIn('Cannot connect to piehole daemon', str(error))
+            self.assertIn('Cannot connect to piehole daemon', str(err))
 
     def test_basics(self):
         for i in range(3):
@@ -203,23 +209,22 @@ class PieholeTest(unittest.TestCase):
     def test_conflict(self):
         self.workrepo.commit()
         self.workrepo.push('a')
-        last = self.workrepo.last_commit()
-        self.assertEqual(last, self.repoa.last_commit())
         self.workrepo.cleanup()
         self.workrepo = TemporaryGitRepo()
-        self.workrepo.add_remote(self.repoa, "a")
         self.workrepo.add_remote(self.repob, "b")
         self.workrepo.commit()
         with in_directory(self.repob):
             run('rm -rf *')
             run('git init --bare')
             run("piehole.py install --repogroup=pieholetest")
-        try:
-            self.workrepo.commit()
-            self.workrepo.push('b')
-            raise NotImplementedError("Push to out of sync repo should fail")
-        except GitFailure as err:
-            assert "Failed to update" in str(err)
+        for failcount in range(20):
+            try:
+                self.workrepo.commit()
+                self.workrepo.push('b')
+                raise AssertionError("Push to out of sync repo should fail")
+            except GitFailure as err:
+                assert "Failed to update" in str(err) or \
+                       "You may want to first merge" in str(err)
 
     def test_out_of_date(self):
         self.workrepo.commit()
@@ -229,14 +234,16 @@ class PieholeTest(unittest.TestCase):
             run('git init --bare')
             run("piehole.py install --repogroup=pieholetest")
         self.workrepo.commit()
-        for i in range(2):
+        for failcount in range(20):
             try:
                 self.workrepo.push('b')
-                time.sleep(1)
-                raise NotImplementedError("Push to repo now catching up should fail")
-            except:
-                time.sleep(1)
-        self.workrepo.push('b')
+                self.assertGreater(failcount, 0,
+                                   "Push to repo catching up should fail at least once")
+                break
+            except GitFailure as err:
+                assert("try your push again" in str(err))
+        else:
+            raise AssertionError("Out of date repo failed to catch up")
 
     def test_tag(self):
         self.workrepo.commit()
