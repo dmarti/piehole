@@ -16,7 +16,8 @@ import urllib.request
 logging.basicConfig(level=logging.DEBUG, format="(PT) %(levelname)s %(message)s")
 
 sys.path.append('.')
-from piehole import run_git, etcd_read, etcd_write, GitFailure, BLANK
+from piehole import run_git, etcd_read, etcd_write, GitFailure, BLANK, \
+                    invoke_daemon
 
 class RunError(Exception):
     pass
@@ -113,6 +114,7 @@ class TemporaryPieholeDaemon:
         self.daemon = subprocess.Popen("piehole.py daemon", shell=True,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.returncode = None
+        assert None == self.daemon.poll()
 
     def cleanup(self):
         if self.returncode is not None:
@@ -180,11 +182,16 @@ class PieholeTest(unittest.TestCase):
             self.assertIn('Cannot connect to piehole daemon', str(err))
 
     def test_daemon(self):
+        self.assertTrue(invoke_daemon(self.repoa.root,
+                                      'refs/heads/master', 'ping'))
+        self.assertTrue(invoke_daemon(self.repoa.root,
+                                      'refs/heads/master', 'push'))
         self.workrepo.commit()
         self.workrepo.push('a')
         with in_directory(self.repoa):
             for command in ['push', 'fetch']:
-                self.assertEqual(b'', run("curl -s -d repo=%s -d command=%s -d ref=refs/heads/master http://localhost:3690" % (self.repoa.root, command))) 
+                self.assertIn(b'Error', run("curl -s -d monkey=yes http://localhost:3690")) 
+        self.assertEqual(self.workrepo.last_commit(), self.repob.last_commit())
 
     def test_basics(self):
         for i in range(3):
@@ -199,13 +206,13 @@ class PieholeTest(unittest.TestCase):
     def test_register(self):
         " Drop repo b's URL from etcd and see that it can re-register itself"
         self.workrepo.commit()
-        self.assertIn('Accepting replication', self.workrepo.push('a'))
+        self.workrepo.push('a')
         with in_directory(self.repoa):
             etcd_write('pieholetest', self.repoa.url)
         self.workrepo.commit()
-        self.assertIn('Accepting replication', self.workrepo.push('b'))
+        self.workrepo.push('b')
         self.workrepo.commit()
-        self.assertIn('Accepting replication', self.workrepo.push('a'))
+        self.workrepo.push('a')
         self.assertEqual(self.workrepo.last_commit(), self.repob.last_commit())
 
     def test_ssh(self):
@@ -217,13 +224,17 @@ class PieholeTest(unittest.TestCase):
             self.workrepo.commit()
             self.assertEqual(i+1, len(self.workrepo.log()))
             last = self.workrepo.last_commit()
-            self.assertIn('Accepting replication', self.workrepo.push('a'))
+            self.workrepo.push('a')
             self.assertEqual(last, self.repoa.last_commit())
             self.assertEqual(last, self.repob.last_commit())
 
     def test_conflict(self):
         self.workrepo.commit()
-        self.workrepo.push('a')
+        self.assertIn("Updating", self.workrepo.push('a'))
+        last = self.workrepo.last_commit()
+        with in_directory(self.repoa):
+            self.assertEqual(last,
+                             etcd_read("%s %s" % ('pieholetest', 'refs/heads/master')))
         self.workrepo.cleanup()
         self.workrepo = TemporaryGitRepo()
         self.workrepo.add_remote(self.repob, "b")
@@ -236,7 +247,7 @@ class PieholeTest(unittest.TestCase):
             try:
                 self.workrepo.commit()
                 self.workrepo.push('b')
-                raise AssertionError("Push to out of sync repo should fail")
+                self.assertEqual(last, self.repob.last_commit())
             except GitFailure as err:
                 assert "Failed to update" in str(err) or \
                        "You may want to first merge" in str(err)
@@ -263,7 +274,7 @@ class PieholeTest(unittest.TestCase):
     def test_tag(self):
         self.workrepo.commit()
         self.workrepo.run_git('tag', 'fun')
-        self.assertIn('Accepting replication', self.workrepo.push('a', 'fun'))
+        self.assertIn('Updating', self.workrepo.push('a', 'fun'))
         self.assertIn('fun', self.repob.run_git('tag'))
 
     def test_overrun_push(self):
@@ -279,7 +290,7 @@ class PieholeTest(unittest.TestCase):
             self.workrepo.push('a')
         except GitFailure as err:
             self.assertIn('Setting refs/heads/master to known commit', str(err))
-        self.assertIn('Accepting replication', self.workrepo.push('a'))
+        self.assertIn('Updating', self.workrepo.push('a'))
 
 
 if __name__ == '__main__':

@@ -32,6 +32,9 @@ BLANK = '0000000000000000000000000000000000000000' # don't change
 logging.basicConfig(level=logging.DEBUG,
                     format="piehole %(levelname)s: %(message)s")
 
+#feature switch
+DAEMON = False
+
 class GitFailure(Exception):
     pass
 
@@ -58,19 +61,18 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
             params = urllib.parse.parse_qs(content)
             os.chdir(params['repo'][0])
             sanity_check()
-            command = params['command'][0]
-            if command == 'ping':
-                pass
+            action = params['action'][0]
+            if action == 'ping':
+                out = ''
             else:
                 ref = params['ref'][0]
-                start_transfer(ref, command)
-            out = ''
+                out = ''
             code = 200
         except SanityCheckFailure as err:
             out = str(err) + "\n"
             code = 400
         except Exception as err:
-            out = str(err) + "\n"
+            out = "Error: this is the piehole daemon"
             code = 500
 
         self.send_response(code)
@@ -78,13 +80,14 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-length', str(len(out)))
         self.end_headers()
         self.wfile.write(out.encode('utf-8'))
-        if code == 200 and command and ref:
-            start_transfer(ref, command)
+        if code == 200 and action and ref:
+            start_transfer(ref, action)
 
 def start_daemon():
    serveraddr = ('127.0.0.1', DAEMON_PORT)
-   # os.chdir('/tmp')
+   os.chdir('/tmp')
    daemon = ForkingHTTPServer(serveraddr, TransferRequestHandler)
+   # daemon = http.server.HTTPServer(serveraddr, TransferRequestHandler)
    daemon.serve_forever()
 
 def run_git(*args):
@@ -186,13 +189,12 @@ def invoke_daemon(repo, ref, action):
         loc = "http://127.0.0.1:%s" % DAEMON_PORT
         res = urllib.request.urlopen(loc, postdata)
         content = res.read().decode('utf-8')
-        if res.read() == '':
+        if content == '':
             return True
         else:
             raise NotImplementedError(content)
     except urllib.error.HTTPError as err:
-        logging.error(err.reason)
-        raise
+        logging.error(str(err))
 
 def sanity_check(installed=True):
     try:
@@ -297,8 +299,10 @@ def post_update():
     the repogroup.
     '''
     for ref in sys.argv[1:]:
-        start_transfer(ref, 'push')
-        # invoke_daemon(reporoot(), ref, 'push')
+        if DAEMON:
+            invoke_daemon(reporoot(), ref, 'push')
+        else:
+            start_transfer(ref, 'push')
     sys.exit(0)
 
 @register
@@ -316,14 +320,15 @@ def update():
     oldval = '' if old == BLANK else old
     if etcd_write("%s %s" % (repogroup, ref), new, oldval):
         logging.info("Updating %s from %s to %s." % (ref, old, new))
-        # invoke_daemon(reporoot(), ref, 'push')
         sys.exit(0)
     try:
         run_git('update-ref', ref, current)
         logging.info("Setting %s to known commit %s" % (ref, current))
     except GitFailure:
-        # invoke_daemon(reporoot(), ref, 'push')
-        start_transfer(ref, 'fetch')
+        if DAEMON:
+            invoke_daemon(reporoot(), ref, 'fetch')
+        else:
+            start_transfer(ref, 'fetch')
         logging.info("Started fetch of %s" % ref)
     logging.warning("Failed to update %s. Replication in progress." % ref)
     logging.warning("Please try your push again.")
