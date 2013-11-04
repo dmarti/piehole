@@ -86,6 +86,18 @@ class TemporaryGitRepo:
     def push(self, reponame, branch='master'):
         return self.run_git('push', reponame, branch)
 
+    def repeat_push(self, reponame, branch='master', repeat=3):
+        count = 0
+        while True:
+            count += 1
+            try:
+                return self.run_git('push', reponame, branch)
+            except GitFailure as err:
+                if count < repeat and "Please try" in str(err):
+                    time.sleep(1)
+                else:
+                    raise
+
     def last_commit(self):
         try:
             res = self.run_git('log', '--format=format:%H', '--max-count=1')
@@ -147,6 +159,28 @@ class PieholeTest(unittest.TestCase):
         self.repob.cleanup()
         self.workrepo.cleanup()
 
+    def current_ref(self, ref='refs/heads/master'):
+        with in_directory(self.repoa):
+            return etcd_read("%s %s" % ('pieholetest', ref))
+
+    def clobber_ref(self, value, ref='refs/heads/master'):
+        while self.current_ref(ref) != value:
+            with in_directory(self.repoa):
+                while True:
+                    if etcd_write('pieholetest refs/heads/master', value,
+                                  self.current_ref(ref)):
+                        time.sleep(1)
+                        break
+
+    def wait_for_replication(self, ref='refs/heads/master'):
+        for i in range(5):
+            if self.current_ref() == self.repoa.last_commit() == \
+               self.repob.last_commit():
+                return True
+            else:
+                time.sleep(1)
+        raise AssertionError("failed to replicate")
+
     def commit(self, repo):
         repo.commit()
 
@@ -186,12 +220,9 @@ class PieholeTest(unittest.TestCase):
                                       'refs/heads/master', 'ping'))
         self.assertTrue(invoke_daemon(self.repoa.root,
                                       'refs/heads/master', 'push'))
-        self.workrepo.commit()
-        self.workrepo.push('a')
         with in_directory(self.repoa):
             for command in ['push', 'fetch']:
                 self.assertIn(b'Error', run("curl -s -d monkey=yes http://localhost:3690")) 
-        self.assertEqual(self.workrepo.last_commit(), self.repob.last_commit())
 
     def test_basics(self):
         for i in range(3):
@@ -202,7 +233,15 @@ class PieholeTest(unittest.TestCase):
             self.assertEqual(last, self.repoa.last_commit())
             time.sleep(2)
             self.assertEqual(last, self.repob.last_commit())
-    
+
+    def test_etcd_write(self):
+        for i in range(5):
+            self.workrepo.commit()
+            self.assertIn("Updating", self.workrepo.push('a'))
+            last = self.workrepo.last_commit()
+            with in_directory(self.repoa):
+                self.assertEqual(last, self.current_ref())
+
     def test_register(self):
         " Drop repo b's URL from etcd and see that it can re-register itself"
         self.workrepo.commit()
@@ -210,10 +249,10 @@ class PieholeTest(unittest.TestCase):
         with in_directory(self.repoa):
             etcd_write('pieholetest', self.repoa.url)
         self.workrepo.commit()
-        self.workrepo.push('b')
+        self.workrepo.repeat_push('b')
         self.workrepo.commit()
-        self.workrepo.push('a')
-        self.assertEqual(self.workrepo.last_commit(), self.repob.last_commit())
+        self.workrepo.repeat_push('a')
+        self.wait_for_replication()
 
     def test_ssh(self):
         self.repob.cleanup()
@@ -232,9 +271,7 @@ class PieholeTest(unittest.TestCase):
         self.workrepo.commit()
         self.assertIn("Updating", self.workrepo.push('a'))
         last = self.workrepo.last_commit()
-        with in_directory(self.repoa):
-            self.assertEqual(last,
-                             etcd_read("%s %s" % ('pieholetest', 'refs/heads/master')))
+        self.assertEqual(last, self.current_ref())
         self.workrepo.cleanup()
         self.workrepo = TemporaryGitRepo()
         self.workrepo.add_remote(self.repob, "b")
@@ -281,13 +318,19 @@ class PieholeTest(unittest.TestCase):
         self.workrepo.commit()
         self.workrepo.push('a')
         current = self.workrepo.last_commit()
+        self.assertEqual(current, self.current_ref())
         self.workrepo.commit()
         self.workrepo.push('a')
-        with in_directory(self.repoa):
-            etcd_write('pieholetest refs/heads/master', current)
+        self.clobber_ref(current)
         self.workrepo.commit()
+        
+        self.assertEqual(current, self.current_ref())
+        self.assertNotEqual(current, self.repoa.last_commit())
+        self.assertNotEqual(current, self.workrepo.last_commit())
+
         try:
-            self.workrepo.push('a')
+            res = self.workrepo.push('a')
+            raise AssertionError("Overrun push should fail, got %s" % res)
         except GitFailure as err:
             self.assertIn('Setting refs/heads/master to known commit', str(err))
         self.assertIn('Updating', self.workrepo.push('a'))
