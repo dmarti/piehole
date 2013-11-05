@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.DEBUG, format="(PT) %(levelname)s %(message)s"
 
 sys.path.append('.')
 from piehole import run_git, etcd_read, etcd_write, GitFailure, BLANK, \
-                    invoke_daemon
+                    invoke_daemon, reporef, DAEMON
 
 class RunError(Exception):
     pass
@@ -62,8 +62,15 @@ class TemporaryGitRepo:
         return("git repo at %s" % self.url)
 
     def cleanup(self):
-        shutil.rmtree(self.root)
-        self.root = None
+        "Retry deleting in case push is in progress when test ends."
+        while True:
+            try:
+                shutil.rmtree(self.root)
+                self.root = None
+                break
+            except OSError as err:
+                if err.errno == 39: # Directory not empty
+                    pass
 
     def commit(self, filename=None, message=None):
         if filename is None:
@@ -98,12 +105,9 @@ class TemporaryGitRepo:
                 else:
                     raise
 
-    def last_commit(self):
-        try:
-            res = self.run_git('log', '--format=format:%H', '--max-count=1')
-            return res.strip()
-        except:
-            return None
+    def reporef(self, ref='refs/heads/master'):
+        with in_directory(self):
+            return reporef(ref)
 
 
 class TemporaryEtcdServer:
@@ -123,8 +127,10 @@ class TemporaryEtcdServer:
 
 class TemporaryPieholeDaemon:
     def __init__ (self):
-        self.daemon = subprocess.Popen("piehole.py daemon", shell=True,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.root = tempfile.mkdtemp()
+        self.daemon = subprocess.Popen("piehole.py daemon",
+                      shell=True, 
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.returncode = None
         assert None == self.daemon.poll()
 
@@ -134,6 +140,11 @@ class TemporaryPieholeDaemon:
             self.daemon.stderr.close()
             self.daemon.terminate()
             self.returncode = self.daemon.wait()
+            shutil.rmtree(self.root)
+
+    def log(self):
+        with open(os.path.join(self.root, 'piehole.log')) as fh:
+            return fh.read.decode('utf-8')
 
 
 class PieholeTest(unittest.TestCase):
@@ -173,13 +184,14 @@ class PieholeTest(unittest.TestCase):
                         break
 
     def wait_for_replication(self, ref='refs/heads/master'):
-        for i in range(5):
-            if self.current_ref() == self.repoa.last_commit() == \
-               self.repob.last_commit():
+        for i in range(20):
+            if self.current_ref(ref) == \
+               self.repoa.reporef(ref) == \
+               self.repob.reporef(ref):
                 return True
             else:
-                time.sleep(1)
-        raise AssertionError("failed to replicate")
+                time.sleep(0.25)
+        raise AssertionError("failed to replicate %s %s %s" % (self.current_ref(ref), self.repoa.reporef(ref), self.repob.reporef(ref)))
 
     def commit(self, repo):
         repo.commit()
@@ -227,23 +239,12 @@ class PieholeTest(unittest.TestCase):
     def test_basics(self):
         for i in range(3):
             self.workrepo.commit()
-            self.assertEqual(i+1, len(self.workrepo.log()))
-            last = self.workrepo.last_commit()
+            last = self.workrepo.reporef()
             self.assertIn('Updating', self.workrepo.push('a'))
-            self.assertEqual(last, self.repoa.last_commit())
-            time.sleep(2)
-            self.assertEqual(last, self.repob.last_commit())
-
-    def test_etcd_write(self):
-        for i in range(5):
-            self.workrepo.commit()
-            self.assertIn("Updating", self.workrepo.push('a'))
-            last = self.workrepo.last_commit()
-            with in_directory(self.repoa):
-                self.assertEqual(last, self.current_ref())
+        self.wait_for_replication()
 
     def test_register(self):
-        " Drop repo b's URL from etcd and see that it can re-register itself"
+        "Drop repo b's URL from etcd and see that it can re-register itself"
         self.workrepo.commit()
         self.workrepo.push('a')
         with in_directory(self.repoa):
@@ -261,17 +262,23 @@ class PieholeTest(unittest.TestCase):
             run("piehole.py install --repogroup=pieholetest --repourl=git+ssh://localhost%s" %  self.repob.root)
         for i in range(2):
             self.workrepo.commit()
-            self.assertEqual(i+1, len(self.workrepo.log()))
-            last = self.workrepo.last_commit()
             self.workrepo.push('a')
-            self.assertEqual(last, self.repoa.last_commit())
-            self.assertEqual(last, self.repob.last_commit())
+            self.wait_for_replication()
+
+    def test_lockout(self):
+        self.clobber_ref('fail')
+        self.workrepo.commit()
+        for i in range(3):
+            try:
+                res = self.workrepo.push('a')
+                raise AssertionError("push should fail, got %s" % res)
+            except GitFailure as err:
+                self.assertIn("Failed to update", str(err))
 
     def test_conflict(self):
         self.workrepo.commit()
         self.assertIn("Updating", self.workrepo.push('a'))
-        last = self.workrepo.last_commit()
-        self.assertEqual(last, self.current_ref())
+        last = self.workrepo.reporef()
         self.workrepo.cleanup()
         self.workrepo = TemporaryGitRepo()
         self.workrepo.add_remote(self.repob, "b")
@@ -280,14 +287,13 @@ class PieholeTest(unittest.TestCase):
             run('rm -rf *')
             run('git init --bare')
             run("piehole.py install --repogroup=pieholetest")
-        for failcount in range(20):
+        for failcount in range(5):
             try:
                 self.workrepo.commit()
-                self.workrepo.push('b')
-                self.assertEqual(last, self.repob.last_commit())
+                res = self.workrepo.push('b')
+                raise AssertionError("push should fail, got %s" % res)
             except GitFailure as err:
-                assert "Failed to update" in str(err) or \
-                       "You may want to first merge" in str(err)
+                self.wait_for_replication()
 
     def test_out_of_date(self):
         self.workrepo.commit()
@@ -308,26 +314,29 @@ class PieholeTest(unittest.TestCase):
         else:
             raise AssertionError("Out of date repo failed to catch up")
 
+    def test_reporef(self):
+        self.workrepo.commit()
+        self.workrepo.run_git('tag', 'fun')
+        self.assertEqual(self.workrepo.reporef(),
+                         self.workrepo.reporef('refs/tags/fun'))
+
     def test_tag(self):
         self.workrepo.commit()
         self.workrepo.run_git('tag', 'fun')
         self.assertIn('Updating', self.workrepo.push('a', 'fun'))
+        self.assertIn('fun', self.repoa.run_git('tag'))
+        self.wait_for_replication('refs/tags/fun')
         self.assertIn('fun', self.repob.run_git('tag'))
 
     def test_overrun_push(self):
         self.workrepo.commit()
         self.workrepo.push('a')
-        current = self.workrepo.last_commit()
+        current = self.workrepo.reporef()
         self.assertEqual(current, self.current_ref())
         self.workrepo.commit()
         self.workrepo.push('a')
         self.clobber_ref(current)
         self.workrepo.commit()
-        
-        self.assertEqual(current, self.current_ref())
-        self.assertNotEqual(current, self.repoa.last_commit())
-        self.assertNotEqual(current, self.workrepo.last_commit())
-
         try:
             res = self.workrepo.push('a')
             raise AssertionError("Overrun push should fail, got %s" % res)

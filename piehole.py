@@ -41,7 +41,6 @@ class GitFailure(Exception):
 class SanityCheckFailure(Exception):
     pass
 
-
 def fail(message):
     logging.error(message)
     sys.exit(1)
@@ -63,16 +62,20 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
             sanity_check()
             action = params['action'][0]
             if action == 'ping':
-                out = ''
+                pass
             else:
                 ref = params['ref'][0]
-                out = ''
+            out = ''
             code = 200
         except SanityCheckFailure as err:
             out = str(err) + "\n"
             code = 400
+        except KeyError as err:
+            out = "Error in request: missing parameter %s" % str(err)
+            self.log_error(out)
+            code = 400
         except Exception as err:
-            out = "Error: this is the piehole daemon"
+            self.log_error(err)
             code = 500
 
         self.send_response(code)
@@ -87,7 +90,6 @@ def start_daemon():
    serveraddr = ('127.0.0.1', DAEMON_PORT)
    os.chdir('/tmp')
    daemon = ForkingHTTPServer(serveraddr, TransferRequestHandler)
-   # daemon = http.server.HTTPServer(serveraddr, TransferRequestHandler)
    daemon.serve_forever()
 
 def run_git(*args):
@@ -113,7 +115,7 @@ def reporoot():
 
 def reporef(ref):
     try:
-        res = run_git('show-ref', '--heads', '--hash', ref)
+        res = run_git('show-ref', '--hash', ref)
         return res.strip()
     except GitFailure:
         return BLANK
