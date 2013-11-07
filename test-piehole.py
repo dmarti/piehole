@@ -2,7 +2,6 @@
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
 
 import contextlib
-import logging
 import os
 import shutil
 import subprocess
@@ -12,8 +11,6 @@ import time
 import unittest
 import urllib.parse
 import urllib.request
-
-logging.basicConfig(level=logging.DEBUG, format="(PT) %(levelname)s %(message)s")
 
 sys.path.append('.')
 from piehole import run_git, etcd_read, etcd_write, GitFailure, BLANK, \
@@ -128,23 +125,24 @@ class TemporaryEtcdServer:
 class TemporaryPieholeDaemon:
     def __init__ (self):
         self.root = tempfile.mkdtemp()
-        self.daemon = subprocess.Popen("piehole.py daemon",
-                      shell=True, 
-                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.logfile = os.path.join(self.root, 'piehole.log')
+        self.daemon = subprocess.Popen("piehole.py daemon --logfile=%s" % self.logfile,
+                      shell=True)
         self.returncode = None
         assert None == self.daemon.poll()
 
     def cleanup(self):
-        if self.returncode is not None:
-            self.daemon.stdout.close()
-            self.daemon.stderr.close()
+        if self.returncode is None:
+            #self.daemon.stdout.close()
+            #self.daemon.stderr.close()
             self.daemon.terminate()
             self.returncode = self.daemon.wait()
             shutil.rmtree(self.root)
 
     def log(self):
-        with open(os.path.join(self.root, 'piehole.log')) as fh:
-            return fh.read.decode('utf-8')
+        with open(self.logfile) as fh:
+            fh.seek(0)
+            return fh.read()
 
 
 class PieholeTest(unittest.TestCase):
@@ -228,13 +226,12 @@ class PieholeTest(unittest.TestCase):
             self.assertIn('Cannot connect to piehole daemon', str(err))
 
     def test_daemon(self):
-        self.assertTrue(invoke_daemon(self.repoa.root,
-                                      'refs/heads/master', 'ping'))
-        self.assertTrue(invoke_daemon(self.repoa.root,
-                                      'refs/heads/master', 'push'))
+        self.workrepo.commit()
+        self.workrepo.push('a')
+        invoke_daemon(self.repoa.root, 'refs/heads/master', 'push')
         with in_directory(self.repoa):
-            for command in ['push', 'fetch']:
-                self.assertIn(b'Error', run("curl -s -d monkey=yes http://localhost:3690")) 
+            self.assertIn(b'Error', run("curl -s -d monkey=yes http://localhost:3690")) 
+        self.assertIn('Transferring refs/heads/master', self.pieholed.log())
 
     def test_basics(self):
         for i in range(3):
@@ -256,13 +253,15 @@ class PieholeTest(unittest.TestCase):
         self.wait_for_replication()
 
     def test_ssh(self):
-        self.repob.cleanup()
-        self.repob = TemporaryGitRepo("--bare")
+        with in_directory(self.repoa):
+            etcd_write('pieholetest', self.repoa.url)
         with in_directory(self.repob):
-            run("piehole.py install --repogroup=pieholetest --repourl=git+ssh://localhost%s" %  self.repob.root)
+            run("git config piehole.repourl git+ssh://localhost%s" % self.repob.root)
+        self.workrepo.commit()
+        self.workrepo.repeat_push('b')
         for i in range(2):
             self.workrepo.commit()
-            self.workrepo.push('a')
+            self.workrepo.repeat_push('a')
             self.wait_for_replication()
 
     def test_lockout(self):

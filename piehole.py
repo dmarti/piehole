@@ -9,6 +9,7 @@ Replicate Git repositories using etcd.
 
 import argparse
 import cgi
+import fcntl
 import filecmp
 import http.server
 import json
@@ -45,10 +46,25 @@ def fail(message):
     logging.error(message)
     sys.exit(1)
 
+def log_to_file(line='', filename=None, cache={}):
+    if filename is not None:
+        cache['filename'] = filename
+    else:
+        filename = cache['filename']
+    logfd = open(filename, 'a+')
+    fcntl.lockf(logfd, fcntl.LOCK_EX)
+    logfd.write(line)
+    logfd.close()
+
 class ForkingHTTPServer(socketserver.ForkingMixIn, http.server.HTTPServer):
     pass
 
 class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        log_to_file("%s - - [%s] %s\n" %
+                    (self.address_string(), self.log_date_time_string(),
+                     format % args))
+
     def do_POST(self):
         try:
             ctype, pdict = cgi.parse_header(
@@ -58,12 +74,13 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get('content-length'))
             content = self.rfile.read(length).decode('utf-8')
             params = urllib.parse.parse_qs(content)
-            os.chdir(params['repo'][0])
-            sanity_check()
+            ref = None
             action = params['action'][0]
             if action == 'ping':
                 pass
             else:
+                os.chdir(params['repo'][0])
+                sanity_check()
                 ref = params['ref'][0]
             out = ''
             code = 200
@@ -75,6 +92,7 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
             self.log_error(out)
             code = 400
         except Exception as err:
+            out = str(err)
             self.log_error(err)
             code = 500
 
@@ -84,11 +102,12 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(out.encode('utf-8'))
         if code == 200 and action and ref:
+            self.log_message("Transferring %s from %s" % (ref, reporoot()))
             start_transfer(ref, action)
 
-def start_daemon():
+def start_daemon(logpath):
    serveraddr = ('127.0.0.1', DAEMON_PORT)
-   os.chdir('/tmp')
+   log_to_file('', filename=logpath)
    daemon = ForkingHTTPServer(serveraddr, TransferRequestHandler)
    daemon.serve_forever()
 
@@ -191,10 +210,7 @@ def invoke_daemon(repo, ref, action):
         loc = "http://127.0.0.1:%s" % DAEMON_PORT
         res = urllib.request.urlopen(loc, postdata)
         content = res.read().decode('utf-8')
-        if content == '':
-            return True
-        else:
-            raise NotImplementedError(content)
+        return content
     except urllib.error.HTTPError as err:
         logging.error(str(err))
 
@@ -268,12 +284,7 @@ def install(repogroup, repourl, etcdroot, etcdprefix):
 def start_transfer(ref, command):
     '''
     Start transferring objects to or from the repos
-    in the repogroup.  This is the simplest, most
-    basic way to do it.  For production use, this
-    would be replaced with a separate process as a
-    dedicated user.  That way we don't need ssh agent
-    forwarding to the other servers, and can return
-    from the original push faster.
+    in the repogroup.
     '''
     if command not in ['fetch', 'push']:
         raise NotImplementedError("Unknown command: %s" % command)
@@ -350,11 +361,13 @@ if __name__ == '__main__':
                             help="etcd root", default=ETCD_ROOT)
     parser.add_argument("--etcdprefix",
                             help="prefix for etcd keys", default=ETCD_PREFIX)
+    parser.add_argument("--logfile",
+                            help="file to log to in daemon mode", default="piehole.log")
     parser.add_argument("command", choices=['help', 'install', 'check', 'daemon'],
                             help="command")
     args = parser.parse_args()
     if args.command == 'daemon':
-        start_daemon()
+        start_daemon(args.logfile)
     if args.command == 'install':
         install(args.repogroup, args.repourl, args.etcdroot, args.etcdprefix)
     elif args.command == 'check':
