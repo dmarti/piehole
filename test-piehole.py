@@ -11,6 +11,7 @@ import time
 import unittest
 import urllib.parse
 import urllib.request
+import uuid
 
 sys.path.append('.')
 from piehole import run_git, etcd_read, etcd_write, GitFailure, BLANK, \
@@ -146,10 +147,18 @@ class TemporaryPieholeDaemon:
 
 
 class PieholeTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.etcd = TemporaryEtcdServer()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.etcd.cleanup()
+
     def setUp(self):
+        self.repogroup = uuid.uuid4().hex
         os.environ['PATH'] = "%s:%s" % (os.getcwd(), os.environ['PATH'])
         shutil.rmtree('__pycache__', ignore_errors=True)
-        self.etcd = TemporaryEtcdServer()
         self.pieholed = TemporaryPieholeDaemon()
         self.repoa = TemporaryGitRepo("--bare")
         self.repob = TemporaryGitRepo("--bare")
@@ -157,12 +166,11 @@ class PieholeTest(unittest.TestCase):
         self.workrepo.add_remote(self.repoa, "a")
         self.workrepo.add_remote(self.repob, "b")
         with in_directory(self.repoa):
-            run("piehole.py install --repogroup=pieholetest")
+            run("piehole.py install --repogroup=%s" % self.repogroup)
         with in_directory(self.repob):
-            run("piehole.py install --repogroup=pieholetest")
+            run("piehole.py install --repogroup=%s" % self.repogroup)
 
     def tearDown(self):
-        self.etcd.cleanup()
         self.pieholed.cleanup()
         self.repoa.cleanup()
         self.repob.cleanup()
@@ -170,14 +178,14 @@ class PieholeTest(unittest.TestCase):
 
     def current_ref(self, ref='refs/heads/master'):
         with in_directory(self.repoa):
-            return etcd_read("%s %s" % ('pieholetest', ref))
+            return etcd_read("%s %s" % (self.repogroup, ref))
 
     def clobber_ref(self, value, ref='refs/heads/master'):
         while self.current_ref(ref) != value:
             with in_directory(self.repoa):
                 while True:
-                    if etcd_write('pieholetest refs/heads/master', value,
-                                  self.current_ref(ref)):
+                    if etcd_write("%s refs/heads/master" % self.repogroup,
+                                  value, self.current_ref(ref)):
                         time.sleep(1)
                         break
 
@@ -237,7 +245,7 @@ class PieholeTest(unittest.TestCase):
         for i in range(3):
             self.workrepo.commit()
             last = self.workrepo.reporef()
-            self.assertIn('Updating', self.workrepo.push('a'))
+            self.workrepo.push('a')
         self.wait_for_replication()
 
     def test_register(self):
@@ -245,7 +253,7 @@ class PieholeTest(unittest.TestCase):
         self.workrepo.commit()
         self.workrepo.push('a')
         with in_directory(self.repoa):
-            etcd_write('pieholetest', self.repoa.url)
+            etcd_write(self.repogroup, self.repoa.url)
         self.workrepo.commit()
         self.workrepo.repeat_push('b')
         self.workrepo.commit()
@@ -254,7 +262,7 @@ class PieholeTest(unittest.TestCase):
 
     def test_ssh(self):
         with in_directory(self.repoa):
-            etcd_write('pieholetest', self.repoa.url)
+            etcd_write(self.repogroup, self.repoa.url)
         with in_directory(self.repob):
             run("git config piehole.repourl git+ssh://localhost%s" % self.repob.root)
         self.workrepo.commit()
@@ -276,7 +284,8 @@ class PieholeTest(unittest.TestCase):
 
     def test_conflict(self):
         self.workrepo.commit()
-        self.assertIn("Updating", self.workrepo.push('a'))
+        self.workrepo.push('a')
+        self.wait_for_replication()
         last = self.workrepo.reporef()
         self.workrepo.cleanup()
         self.workrepo = TemporaryGitRepo()
@@ -285,7 +294,7 @@ class PieholeTest(unittest.TestCase):
         with in_directory(self.repob):
             run('rm -rf *')
             run('git init --bare')
-            run("piehole.py install --repogroup=pieholetest")
+            run("piehole.py install --repogroup=%s" % self.repogroup)
         for failcount in range(5):
             try:
                 self.workrepo.commit()
@@ -300,7 +309,7 @@ class PieholeTest(unittest.TestCase):
         with in_directory(self.repob):
             run('rm -rf *')
             run('git init --bare')
-            run("piehole.py install --repogroup=pieholetest")
+            run("piehole.py install --repogroup=%s" % self.repogroup)
         self.workrepo.commit()
         for failcount in range(20):
             try:
@@ -322,7 +331,7 @@ class PieholeTest(unittest.TestCase):
     def test_tag(self):
         self.workrepo.commit()
         self.workrepo.run_git('tag', 'fun')
-        self.assertIn('Updating', self.workrepo.push('a', 'fun'))
+        self.workrepo.push('a', 'fun')
         self.assertIn('fun', self.repoa.run_git('tag'))
         self.wait_for_replication('refs/tags/fun')
         self.assertIn('fun', self.repob.run_git('tag'))
@@ -336,12 +345,7 @@ class PieholeTest(unittest.TestCase):
         self.workrepo.push('a')
         self.clobber_ref(current)
         self.workrepo.commit()
-        try:
-            res = self.workrepo.push('a')
-            raise AssertionError("Overrun push should fail, got %s" % res)
-        except GitFailure as err:
-            self.assertIn('Setting refs/heads/master to known commit', str(err))
-        self.assertIn('Updating', self.workrepo.push('a'))
+        self.workrepo.repeat_push('a')
 
 
 if __name__ == '__main__':
