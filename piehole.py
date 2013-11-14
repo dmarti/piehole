@@ -112,14 +112,15 @@ def start_daemon(logpath):
    daemon.serve_forever()
 
 def run_git(*args):
+    encoding = locale.getpreferredencoding()
     lines = []
     try:
         args = [GIT] + list(args)
         gitcmd = subprocess.Popen(args,
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT)
-        for line in gitcmd.stdout.readlines():
-            lines.append(line.decode(config('encoding')))
+        for line in gitcmd.stdout:
+            lines.append(line.decode(encoding))
         gitcmd.stdout.close()
         code = gitcmd.wait()
         if code != 0:
@@ -158,10 +159,7 @@ def config(key, value=None, cache={}):
         try:
             res = run_git('config', '--local', git_key).strip()
         except GitFailure:
-            if key == 'encoding':
-                res = locale.getpreferredencoding()
-            else:
-                res = None
+            res = None
         cache[key] = res
         return res
     else:
