@@ -14,7 +14,6 @@ import filecmp
 import http.server
 import json
 import locale
-import logging
 import os
 import shutil
 import socketserver
@@ -30,11 +29,9 @@ ETCD_PREFIX = 'piehole'
 ETCD_ROOT = 'http://127.0.0.1:4001'
 DAEMON_PORT = 3690
 BLANK = '0000000000000000000000000000000000000000' # don't change
-logging.basicConfig(level=logging.DEBUG,
-                    format="piehole %(levelname)s: %(message)s")
 
 #feature switch
-DAEMON = False
+DAEMON = True
 
 class GitFailure(Exception):
     pass
@@ -42,28 +39,34 @@ class GitFailure(Exception):
 class SanityCheckFailure(Exception):
     pass
 
-def fail(message):
-    logging.error(message)
-    sys.exit(1)
+def log(line='', to=sys.stdout, cache={}):
+    to = cache['to'] = cache.get('to', to)
+    if hasattr(to, 'writable') and to.writable:
+        print(line, file=to)
+        return
+    try:
+        logfd = open(to, 'a+')
+        fcntl.lockf(logfd, fcntl.LOCK_EX)
+        logfd.write(str(line))
+        logfd.close()
+    except FileNotFoundError:
+        pass
 
-def log_to_file(line='', filename=None, cache={}):
-    if filename is not None:
-        cache['filename'] = filename
-    else:
-        filename = cache['filename']
-    logfd = open(filename, 'a+')
-    fcntl.lockf(logfd, fcntl.LOCK_EX)
-    logfd.write(line)
-    logfd.close()
+def log_error(line):
+    log(line, to=sys.stderr)
+
+def fail(message):
+    log_error(message)
+    sys.exit(1)
 
 class ForkingHTTPServer(socketserver.ForkingMixIn, http.server.HTTPServer):
     pass
 
 class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        log_to_file("%s - - [%s] %s\n" %
-                    (self.address_string(), self.log_date_time_string(),
-                     format % args))
+        log("%s - - [%s] %s\n" %
+            (self.address_string(), self.log_date_time_string(),
+            format % args))
 
     def do_POST(self):
         try:
@@ -107,7 +110,7 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
 
 def start_daemon(logpath):
    serveraddr = ('127.0.0.1', DAEMON_PORT)
-   log_to_file('', filename=logpath)
+   log('', to=logpath)
    daemon = ForkingHTTPServer(serveraddr, TransferRequestHandler)
    daemon.serve_forever()
 
@@ -197,8 +200,8 @@ def etcd_write(key, value, prev=None):
     except urllib.error.HTTPError as err:
         charset = err.headers.get_param('charset')
         data = json.loads(err.read().decode(charset))
-        logging.debug(data.get('message'))
-        logging.debug(data.get('cause'))
+        log(data.get('message'))
+        log(data.get('cause'))
         return False
 
 def invoke_daemon(repo, ref, action):
@@ -210,7 +213,7 @@ def invoke_daemon(repo, ref, action):
         content = res.read().decode('utf-8')
         return content
     except urllib.error.HTTPError as err:
-        logging.error(str(err))
+        log_error(str(err))
 
 def sanity_check(installed=True):
     try:
@@ -274,8 +277,8 @@ def install(repogroup, repourl, etcdroot, etcdprefix):
     config('repogroup', repogroup)
     config('repourl', repourl)
     if repourl.startswith('file'):
-        logging.warning("Using %s for repo URL." % repourl)
-        logging.warning("You probably want an ssh URL instead.")
+        log("Using %s for repo URL." % repourl)
+        log("You probably want an ssh URL instead.")
     add_to_repogroup()
 
 @register
@@ -298,9 +301,9 @@ def start_transfer(ref, command):
         if remote == here:
             continue
         try:
-            logging.debug(run_git(command, remote, target))
+            log(run_git(command, remote, target))
         except GitFailure as f:
-            logging.warning(f)
+            log_error(f)
 
 @register
 def post_update():
@@ -326,23 +329,23 @@ def update():
     current = etcd_read("%s %s" % (repogroup, ref))
     if current == new: 
         # This is safe even if the ref just changed since reading from etcd.
-        logging.info("Accepting replication of %s from %s to %s" % (ref, old, new))
+        log("Accepting replication of %s from %s to %s" % (ref, old, new))
         sys.exit(0)
     oldval = '' if old == BLANK else old
     if etcd_write("%s %s" % (repogroup, ref), new, oldval):
-        logging.info("Updating %s from %s to %s." % (ref, old, new))
+        log("Updating %s from %s to %s." % (ref, old, new))
         sys.exit(0)
     try:
         run_git('update-ref', ref, current)
-        logging.info("Setting %s to known commit %s" % (ref, current))
+        log("Setting %s to known commit %s" % (ref, current))
     except GitFailure:
         if DAEMON:
             invoke_daemon(reporoot(), ref, 'fetch')
         else:
             start_transfer(ref, 'fetch')
-        logging.info("Started fetch of %s" % ref)
-    logging.warning("Failed to update %s. Replication in progress." % ref)
-    logging.warning("Please try your push again.")
+        log("Started fetch of %s" % ref)
+    log("Failed to update %s. Replication in progress." % ref)
+    log("Please try your push again.")
     sys.exit(1)
 
 if __name__ == '__main__':

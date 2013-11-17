@@ -1,6 +1,7 @@
 *.swp
 etcd
 *.py[cod]
+piehole.log
 
 # C extensions
 *.so

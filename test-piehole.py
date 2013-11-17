@@ -15,7 +15,7 @@ import uuid
 
 sys.path.append('.')
 from piehole import run_git, etcd_read, etcd_write, GitFailure, BLANK, \
-                    invoke_daemon, reporef, DAEMON
+                    invoke_daemon, reporef
 
 class RunError(Exception):
     pass
@@ -99,7 +99,7 @@ class TemporaryGitRepo:
                 return self.run_git('push', reponame, branch)
             except GitFailure as err:
                 if count < repeat and "Please try" in str(err):
-                    time.sleep(1)
+                    time.sleep(0.25)
                 else:
                     raise
 
@@ -186,7 +186,6 @@ class PieholeTest(unittest.TestCase):
                 while True:
                     if etcd_write("%s refs/heads/master" % self.repogroup,
                                   value, self.current_ref(ref)):
-                        time.sleep(1)
                         break
 
     def wait_for_replication(self, ref='refs/heads/master'):
