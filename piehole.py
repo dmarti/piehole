@@ -9,6 +9,7 @@ Replicate Git repositories using etcd.
 
 import argparse
 import cgi
+from datetime import datetime
 import fcntl
 import filecmp
 import http.server
@@ -39,16 +40,17 @@ class GitFailure(Exception):
 class SanityCheckFailure(Exception):
     pass
 
-def log(line='', to=sys.stdout, cache={}):
+def log(message='', to=sys.stdout, cache={}):
     to = cache['to'] = cache.get('to', to)
     if hasattr(to, 'writable') and to.writable:
-        print(line, file=to)
+        print(message, file=to)
         return
     try:
-        logfd = open(to, 'a+')
-        fcntl.lockf(logfd, fcntl.LOCK_EX)
-        logfd.write(str(line))
-        logfd.close()
+        with open(to, 'a+') as logfd:
+            fcntl.lockf(logfd, fcntl.LOCK_EX)
+            for item in str(message).splitlines():
+                line = "%s %s %s\n" % (os.getpid(), datetime.now().isoformat(), item.strip())
+                logfd.write(str(line))
     except FileNotFoundError:
         pass
 
@@ -64,9 +66,7 @@ class ForkingHTTPServer(socketserver.ForkingMixIn, http.server.HTTPServer):
 
 class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        log("%s - - [%s] %s\n" %
-            (self.address_string(), self.log_date_time_string(),
-            format % args))
+        log("%s\n" % (format % args))
 
     def do_POST(self):
         try:

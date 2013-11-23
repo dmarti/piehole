@@ -134,10 +134,10 @@ class TemporaryPieholeDaemon:
 
     def cleanup(self):
         if self.returncode is None:
-            #self.daemon.stdout.close()
-            #self.daemon.stderr.close()
             self.daemon.terminate()
             self.returncode = self.daemon.wait()
+            with in_directory(self.root):
+                run('cat piehole.log >> /tmp/piehole.log')
             shutil.rmtree(self.root)
 
     def log(self):
@@ -298,7 +298,8 @@ class PieholeTest(unittest.TestCase):
             try:
                 self.workrepo.commit()
                 res = self.workrepo.push('b')
-                raise AssertionError("push should fail, got %s" % res)
+                if failcount == 0:
+                    raise AssertionError("push should fail, got %s" % res)
             except GitFailure as err:
                 self.wait_for_replication()
 
