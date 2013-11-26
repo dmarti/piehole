@@ -189,7 +189,7 @@ class PieholeTest(unittest.TestCase):
                         break
 
     def wait_for_replication(self, ref='refs/heads/master'):
-        for i in range(20):
+        for i in range(10):
             if self.current_ref(ref) == \
                self.repoa.reporef(ref) == \
                self.repob.reporef(ref):
@@ -298,8 +298,7 @@ class PieholeTest(unittest.TestCase):
             try:
                 self.workrepo.commit()
                 res = self.workrepo.push('b')
-                if failcount == 0:
-                    raise AssertionError("push should fail, got %s" % res)
+                self.assertGreater(failcount, 0, "push should fail, got %s" % res)
             except GitFailure as err:
                 self.wait_for_replication()
 
@@ -321,6 +320,25 @@ class PieholeTest(unittest.TestCase):
                 assert("try your push again" in str(err))
         else:
             raise AssertionError("Out of date repo failed to catch up")
+
+    def test_clobber(self):
+        self.workrepo.commit()
+        self.workrepo.push('a')
+        self.wait_for_replication()
+        with in_directory(self.repoa):
+            etcd_write("%s %s" % (self.repogroup, 'refs/heads/master'),
+                       'dead000000000000000000000000000000000000')
+        for failcount in range(5):
+            try:
+                self.workrepo.commit()
+                res = self.workrepo.push('a')
+                raise AssertionError("Hopeless push should fail, got %s" % res)
+            except GitFailure as err:
+                self.assertIn("failed", str(err))
+        with in_directory(self.repob):
+            run("piehole.py clobber")
+        self.workrepo.push('a')
+        self.wait_for_replication()
 
     def test_reporef(self):
         self.workrepo.commit()
