@@ -15,7 +15,7 @@ import uuid
 
 sys.path.append('.')
 from piehole import run_git, etcd_read, etcd_write, GitFailure, BLANK, \
-                    invoke_daemon, reporef, DAEMON
+                    invoke_daemon, reporef
 
 class RunError(Exception):
     pass
@@ -99,7 +99,7 @@ class TemporaryGitRepo:
                 return self.run_git('push', reponame, branch)
             except GitFailure as err:
                 if count < repeat and "Please try" in str(err):
-                    time.sleep(1)
+                    time.sleep(0.25)
                 else:
                     raise
 
@@ -134,10 +134,10 @@ class TemporaryPieholeDaemon:
 
     def cleanup(self):
         if self.returncode is None:
-            #self.daemon.stdout.close()
-            #self.daemon.stderr.close()
             self.daemon.terminate()
             self.returncode = self.daemon.wait()
+            with in_directory(self.root):
+                run('cat piehole.log >> /tmp/piehole.log')
             shutil.rmtree(self.root)
 
     def log(self):
@@ -186,11 +186,10 @@ class PieholeTest(unittest.TestCase):
                 while True:
                     if etcd_write("%s refs/heads/master" % self.repogroup,
                                   value, self.current_ref(ref)):
-                        time.sleep(1)
                         break
 
     def wait_for_replication(self, ref='refs/heads/master'):
-        for i in range(20):
+        for i in range(10):
             if self.current_ref(ref) == \
                self.repoa.reporef(ref) == \
                self.repob.reporef(ref):
@@ -299,7 +298,7 @@ class PieholeTest(unittest.TestCase):
             try:
                 self.workrepo.commit()
                 res = self.workrepo.push('b')
-                raise AssertionError("push should fail, got %s" % res)
+                self.assertGreater(failcount, 0, "push should fail, got %s" % res)
             except GitFailure as err:
                 self.wait_for_replication()
 
@@ -321,6 +320,25 @@ class PieholeTest(unittest.TestCase):
                 assert("try your push again" in str(err))
         else:
             raise AssertionError("Out of date repo failed to catch up")
+
+    def test_clobber(self):
+        self.workrepo.commit()
+        self.workrepo.push('a')
+        self.wait_for_replication()
+        with in_directory(self.repoa):
+            etcd_write("%s %s" % (self.repogroup, 'refs/heads/master'),
+                       'dead000000000000000000000000000000000000')
+        for failcount in range(5):
+            try:
+                self.workrepo.commit()
+                res = self.workrepo.push('a')
+                raise AssertionError("Hopeless push should fail, got %s" % res)
+            except GitFailure as err:
+                self.assertIn("failed", str(err))
+        with in_directory(self.repob):
+            run("piehole.py clobber")
+        self.workrepo.push('a')
+        self.wait_for_replication()
 
     def test_reporef(self):
         self.workrepo.commit()

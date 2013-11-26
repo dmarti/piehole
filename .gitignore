@@ -2,6 +2,7 @@
 etcd
 piehole.log
 *.py[cod]
+piehole.log
 
 # C extensions
 *.so

@@ -9,12 +9,12 @@ Replicate Git repositories using etcd.
 
 import argparse
 import cgi
+from datetime import datetime
 import fcntl
 import filecmp
 import http.server
 import json
 import locale
-import logging
 import os
 import shutil
 import socketserver
@@ -30,11 +30,6 @@ ETCD_PREFIX = 'piehole'
 ETCD_ROOT = 'http://127.0.0.1:4001'
 DAEMON_PORT = 3690
 BLANK = '0000000000000000000000000000000000000000' # don't change
-logging.basicConfig(level=logging.DEBUG,
-                    format="piehole %(levelname)s: %(message)s")
-
-#feature switch
-DAEMON = False
 
 class GitFailure(Exception):
     pass
@@ -42,28 +37,33 @@ class GitFailure(Exception):
 class SanityCheckFailure(Exception):
     pass
 
-def fail(message):
-    logging.error(message)
-    sys.exit(1)
+def log(message='', to=sys.stdout, cache={}):
+    to = cache['to'] = cache.get('to', to)
+    if hasattr(to, 'writable') and to.writable:
+        print(message, file=to)
+        return
+    try:
+        with open(to, 'a+') as logfd:
+            fcntl.lockf(logfd, fcntl.LOCK_EX)
+            for item in str(message).splitlines():
+                line = "%s %s %s\n" % (os.getpid(), datetime.now().isoformat(), item.strip())
+                logfd.write(str(line))
+    except FileNotFoundError:
+        pass
 
-def log_to_file(line='', filename=None, cache={}):
-    if filename is not None:
-        cache['filename'] = filename
-    else:
-        filename = cache['filename']
-    logfd = open(filename, 'a+')
-    fcntl.lockf(logfd, fcntl.LOCK_EX)
-    logfd.write(line)
-    logfd.close()
+def log_error(line):
+    log(line, to=sys.stderr)
+
+def fail(message):
+    log_error(message)
+    sys.exit(1)
 
 class ForkingHTTPServer(socketserver.ForkingMixIn, http.server.HTTPServer):
     pass
 
 class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        log_to_file("%s - - [%s] %s\n" %
-                    (self.address_string(), self.log_date_time_string(),
-                     format % args))
+        log("%s\n" % (format % args))
 
     def do_POST(self):
         try:
@@ -107,7 +107,7 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
 
 def start_daemon(logpath):
    serveraddr = ('127.0.0.1', DAEMON_PORT)
-   log_to_file('', filename=logpath)
+   log('', to=logpath)
    daemon = ForkingHTTPServer(serveraddr, TransferRequestHandler)
    daemon.serve_forever()
 
@@ -128,6 +128,19 @@ def run_git(*args):
         return ''.join(lines)
     except subprocess.CalledProcessError:
         raise GitFailure(''.join(lines)) 
+
+def list_refs():
+    result = []
+    try:
+        for line in run_git('show-ref', '--tags', '--heads').splitlines():
+            refname = line.split()[1]
+            result.append(refname)
+    except GitFailure as err:
+        if '' == str(err):
+            pass
+        else:
+            raise
+    return result
 
 def reporoot():
     git_dir = run_git('rev-parse', '--git-dir').strip()
@@ -197,8 +210,8 @@ def etcd_write(key, value, prev=None):
     except urllib.error.HTTPError as err:
         charset = err.headers.get_param('charset')
         data = json.loads(err.read().decode(charset))
-        logging.debug(data.get('message'))
-        logging.debug(data.get('cause'))
+        log(data.get('message'))
+        log(data.get('cause'))
         return False
 
 def invoke_daemon(repo, ref, action):
@@ -210,7 +223,7 @@ def invoke_daemon(repo, ref, action):
         content = res.read().decode('utf-8')
         return content
     except urllib.error.HTTPError as err:
-        logging.error(str(err))
+        log_error(str(err))
 
 def sanity_check(installed=True):
     try:
@@ -263,7 +276,10 @@ def register(fn):
     return wrapped
 
 def install(repogroup, repourl, etcdroot, etcdprefix):
-    sanity_check(installed=False)
+    try:
+        sanity_check(installed=False)
+    except SanityCheckFailure as err:
+        fail(str(err))
     for hook in ('update', 'post-update'):
         path = os.path.join(reporoot(), 'hooks', hook)
         shutil.copyfile(__file__, path)
@@ -274,8 +290,8 @@ def install(repogroup, repourl, etcdroot, etcdprefix):
     config('repogroup', repogroup)
     config('repourl', repourl)
     if repourl.startswith('file'):
-        logging.warning("Using %s for repo URL." % repourl)
-        logging.warning("You probably want an ssh URL instead.")
+        log("Using %s for repo URL." % repourl)
+        log("You probably want an ssh URL instead.")
     add_to_repogroup()
 
 @register
@@ -298,9 +314,9 @@ def start_transfer(ref, command):
         if remote == here:
             continue
         try:
-            logging.debug(run_git(command, remote, target))
+            log(run_git(command, remote, target))
         except GitFailure as f:
-            logging.warning(f)
+            log_error(f)
 
 @register
 def post_update():
@@ -310,10 +326,7 @@ def post_update():
     the repogroup.
     '''
     for ref in sys.argv[1:]:
-        if DAEMON:
-            invoke_daemon(reporoot(), ref, 'push')
-        else:
-            start_transfer(ref, 'push')
+        invoke_daemon(reporoot(), ref, 'push')
     sys.exit(0)
 
 @register
@@ -326,31 +339,46 @@ def update():
     current = etcd_read("%s %s" % (repogroup, ref))
     if current == new: 
         # This is safe even if the ref just changed since reading from etcd.
-        logging.info("Accepting replication of %s from %s to %s" % (ref, old, new))
+        log("Accepting replication of %s from %s to %s" % (ref, old, new))
         sys.exit(0)
     oldval = '' if old == BLANK else old
     if etcd_write("%s %s" % (repogroup, ref), new, oldval):
-        logging.info("Updating %s from %s to %s." % (ref, old, new))
+        log("Updating %s from %s to %s." % (ref, old, new))
         sys.exit(0)
     try:
         run_git('update-ref', ref, current)
-        logging.info("Setting %s to known commit %s" % (ref, current))
+        log("Setting %s to known commit %s" % (ref, current))
     except GitFailure:
-        if DAEMON:
-            invoke_daemon(reporoot(), ref, 'fetch')
-        else:
-            start_transfer(ref, 'fetch')
-        logging.info("Started fetch of %s" % ref)
-    logging.warning("Failed to update %s. Replication in progress." % ref)
-    logging.warning("Please try your push again.")
+        invoke_daemon(reporoot(), ref, 'fetch')
+        log("Started fetch of %s" % ref)
+    log("Failed to update %s. Replication in progress." % ref)
+    log("Please try your push again.")
     sys.exit(1)
 
+def clobber():
+    for ref in list_refs():
+        etcd_write("%s %s" % (config('repogroup'), ref), reporef(ref))
+    sys.exit(0)
+
 if __name__ == '__main__':
+    epilog = '''
+    help: this help
+
+    install: Run inside a Git repo to add the hooks and configuration items.
+
+    check: Verify correct installation
+
+    daemon: Start the piehole daemon.  Only one needs to run per host.
+
+    clobber: Set the consensus refs to match this repository.
+    '''
     if sys.argv[0] == 'hooks/update':
         update()
     elif sys.argv[0] == 'hooks/post-update':
         post_update()
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--repogroup",
                             help="repogroup to join", default=guess_reponame())
     parser.add_argument("--repourl",
@@ -361,12 +389,14 @@ if __name__ == '__main__':
                             help="prefix for etcd keys", default=ETCD_PREFIX)
     parser.add_argument("--logfile",
                             help="file to log to in daemon mode", default="piehole.log")
-    parser.add_argument("command", choices=['help', 'install', 'check', 'daemon'],
+    parser.add_argument("command", choices=['help', 'install', 'check', 'daemon', 'clobber'],
                             help="command")
     args = parser.parse_args()
     if args.command == 'daemon':
         start_daemon(args.logfile)
-    if args.command == 'install':
+    elif args.command == 'clobber':
+        clobber()
+    elif args.command == 'install':
         install(args.repogroup, args.repourl, args.etcdroot, args.etcdprefix)
     elif args.command == 'check':
         try:
@@ -381,4 +411,4 @@ if __name__ == '__main__':
     else:
         parser.print_help()
     #TODO: add commands to let you run piehole from existing hook scripts?
-    #TODO: reset command to reset etcd state to match this repo/ref
+    #TODO: have "check" also check that refs are up to date
