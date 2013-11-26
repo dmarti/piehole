@@ -1,5 +1,6 @@
 *.swp
 etcd
+piehole.log
 *.py[cod]
 
 # C extensions
