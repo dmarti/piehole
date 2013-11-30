@@ -93,7 +93,7 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
             code = 400
         except Exception as err:
             out = str(err)
-            self.log_error(err)
+            self.log_error(out)
             code = 500
 
         self.send_response(code)
@@ -316,7 +316,7 @@ def start_transfer(ref, command):
         try:
             log(run_git(command, remote, target))
         except GitFailure as f:
-            log_error(f)
+            log_error(str(f))
 
 @register
 def post_update():
