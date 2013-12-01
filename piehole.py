@@ -102,8 +102,11 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(out.encode('utf-8'))
         if code == 200 and action and ref:
-            self.log_message("Transferring %s from %s" % (ref, reporoot()))
-            start_transfer(ref, action)
+            try:
+                self.log_message("Transferring %s from %s" % (ref, reporoot()))
+                start_transfer(ref, action)
+            except Exception as err:
+                self.log_error(str(err))
 
 def start_daemon(logpath):
    serveraddr = ('127.0.0.1', DAEMON_PORT)
