@@ -20,6 +20,16 @@ from piehole import run_git, etcd_read, etcd_write, GitFailure, BLANK, \
 class RunError(Exception):
     pass
 
+def cleanup_directory(path):
+    "Remove a directory and contents even if written into by another process"
+    while True:
+        try:
+            shutil.rmtree(path)
+            break
+        except OSError as err:
+            if 39 != err.errno: # 39: directory not empty
+                raise
+
 def run(command):
     try:
         return subprocess.check_output(command,
@@ -60,15 +70,7 @@ class TemporaryGitRepo:
         return("git repo at %s" % self.url)
 
     def cleanup(self):
-        "Retry deleting in case push is in progress when test ends."
-        while True:
-            try:
-                shutil.rmtree(self.root)
-                self.root = None
-                break
-            except OSError as err:
-                if err.errno == 39: # Directory not empty
-                    pass
+        cleanup_directory(self.root)
 
     def commit(self, filename=None, message=None):
         if filename is None:
@@ -116,29 +118,30 @@ class TemporaryEtcdServer:
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def cleanup(self):
-        self.etcd.stdout.close()
-        self.etcd.stderr.close()
         self.etcd.terminate()
         self.etcd.wait()
-        shutil.rmtree(self.root)
+        cleanup_directory(self.root)
 
 
 class TemporaryPieholeDaemon:
     def __init__ (self):
+        self.returncode = None
         self.root = tempfile.mkdtemp()
         self.logfile = os.path.join(self.root, 'piehole.log')
-        self.daemon = subprocess.Popen("piehole.py daemon --logfile=%s" % self.logfile,
-                      shell=True)
-        self.returncode = None
+        while True:
+            try:
+                self.daemon = subprocess.Popen(["piehole.py", "daemon", "--logfile=%s" % self.logfile])
+                run("curl --connect-timeout 1 -s -d action=ping http://localhost:3690")
+                break
+            except RunError:
+                pass
         assert None == self.daemon.poll()
 
     def cleanup(self):
         if self.returncode is None:
             self.daemon.terminate()
             self.returncode = self.daemon.wait()
-            with in_directory(self.root):
-                run('cat piehole.log >> /tmp/piehole.log')
-            shutil.rmtree(self.root)
+            cleanup_directory(self.root)
 
     def log(self):
         with open(self.logfile) as fh:
@@ -160,6 +163,7 @@ class PieholeTest(unittest.TestCase):
         os.environ['PATH'] = "%s:%s" % (os.getcwd(), os.environ['PATH'])
         shutil.rmtree('__pycache__', ignore_errors=True)
         self.pieholed = TemporaryPieholeDaemon()
+
         self.repoa = TemporaryGitRepo("--bare")
         self.repob = TemporaryGitRepo("--bare")
         self.workrepo = TemporaryGitRepo()
