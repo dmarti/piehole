@@ -216,6 +216,7 @@ class PieholeTest(unittest.TestCase):
                 run("piehole.py install")
 
     def test_reflog_config(self):
+         "Fail if the reflog is turned off."
          with in_directory(self.repoa):
              run('git config --local core.logAllRefUpdates false')
              with self.assertRaisesRegex(RunError,
@@ -247,7 +248,6 @@ class PieholeTest(unittest.TestCase):
     def test_basics(self):
         for i in range(3):
             self.workrepo.commit()
-            last = self.workrepo.reporef()
             self.workrepo.push('a')
         self.wait_for_replication()
 
@@ -273,40 +273,23 @@ class PieholeTest(unittest.TestCase):
         for i in range(2):
             self.workrepo.commit()
             self.workrepo.repeat_push('a')
-            self.wait_for_replication()
+        self.wait_for_replication()
 
     def test_lockout(self):
+        "Impossible consensus ref prevents push."
         self.clobber_ref('fail')
         self.workrepo.commit()
-        for i in range(3):
+        for i in range(20):
             try:
                 res = self.workrepo.push('a')
                 raise AssertionError("push should fail, got %s" % res)
             except GitFailure as err:
                 self.assertIn("Failed to update", str(err))
-
-    def test_conflict(self):
-        self.workrepo.commit()
-        self.workrepo.push('a')
-        self.wait_for_replication()
-        last = self.workrepo.reporef()
-        self.workrepo.cleanup()
-        self.workrepo = TemporaryGitRepo()
-        self.workrepo.add_remote(self.repob, "b")
-        self.workrepo.commit()
-        with in_directory(self.repob):
-            run('rm -rf *')
-            run('git init --bare')
-            run("piehole.py install --repogroup=%s" % self.repogroup)
-        for failcount in range(5):
-            try:
-                self.workrepo.commit()
-                res = self.workrepo.push('b')
-                self.assertGreater(failcount, 0, "push should fail, got %s" % res)
-            except GitFailure as err:
-                self.wait_for_replication()
+        with self.assertRaisesRegex(AssertionError, 'failed to replicate'):
+            self.wait_for_replication()
 
     def test_out_of_date(self):
+        "Push to an out of date repo succeeds eventually."
         self.workrepo.commit()
         self.workrepo.push('a')
         with in_directory(self.repob):
@@ -316,23 +299,22 @@ class PieholeTest(unittest.TestCase):
         self.workrepo.commit()
         for failcount in range(20):
             try:
-                self.workrepo.push('b')
-                self.assertGreater(failcount, 0,
-                                   "Push to repo catching up should fail at least once")
+                res = self.workrepo.push('b')
+                self.assertGreater(failcount, 0, "first push should fail, got %s" % res)
                 break
             except GitFailure as err:
                 assert("try your push again" in str(err))
+                self.wait_for_replication()
         else:
             raise AssertionError("Out of date repo failed to catch up")
 
     def test_clobber(self):
+        "Get stuck, then unstick with clobber from one repo"
         self.workrepo.commit()
         self.workrepo.push('a')
         self.wait_for_replication()
-        with in_directory(self.repoa):
-            etcd_write("%s %s" % (self.repogroup, 'refs/heads/master'),
-                       'dead000000000000000000000000000000000000')
-        for failcount in range(5):
+        self.clobber_ref('dead')
+        for failcount in range(10):
             try:
                 self.workrepo.commit()
                 res = self.workrepo.push('a')
@@ -351,6 +333,7 @@ class PieholeTest(unittest.TestCase):
                          self.workrepo.reporef('refs/tags/fun'))
 
     def test_tag(self):
+        "Replicate a tag."
         self.workrepo.commit()
         self.workrepo.run_git('tag', 'fun')
         self.workrepo.push('a', 'fun')
@@ -359,13 +342,13 @@ class PieholeTest(unittest.TestCase):
         self.assertIn('fun', self.repob.run_git('tag'))
 
     def test_overrun_push(self):
+        "Rewind the consensus to an earlier known commit and catch up."
         self.workrepo.commit()
         self.workrepo.push('a')
-        current = self.workrepo.reporef()
-        self.assertEqual(current, self.current_ref())
+        orig = self.workrepo.reporef()
         self.workrepo.commit()
         self.workrepo.push('a')
-        self.clobber_ref(current)
+        self.clobber_ref(orig)
         self.workrepo.commit()
         self.workrepo.repeat_push('a')
 
