@@ -206,8 +206,6 @@ class PieholeTest(unittest.TestCase):
         self.workrepo = TemporaryGitRepo()
         self.workrepo.add_remote(self.repoa, "a")
         self.workrepo.add_remote(self.repob, "b")
-        with in_directory(self.repob):
-            run("piehole.py install --repogroup=%s" % self.repogroup)
 
     def tearDown(self):
         self.pieholed.cleanup()
