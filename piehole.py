@@ -109,10 +109,16 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
                 self.log_error(str(err))
 
 def start_daemon(logpath):
-   serveraddr = ('127.0.0.1', DAEMON_PORT)
-   log('', to=logpath)
-   daemon = ForkingHTTPServer(serveraddr, TransferRequestHandler)
-   daemon.serve_forever()
+    serveraddr = ('127.0.0.1', DAEMON_PORT)
+    log('', to=logpath)
+    try:
+        daemon = ForkingHTTPServer(serveraddr, TransferRequestHandler)
+    except OSError as err:
+        if 98 == err.errno:
+            fail(str(err))
+        else:
+            raise
+    daemon.serve_forever()
 
 def run_git(*args):
     encoding = locale.getpreferredencoding()
@@ -404,6 +410,7 @@ if __name__ == '__main__':
     elif args.command == 'check':
         try:
             sanity_check()
+            add_to_repogroup()
         except SanityCheckFailure as err:
             fail(str(err))
         try:

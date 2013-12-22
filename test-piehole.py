@@ -17,6 +17,8 @@ sys.path.append('.')
 from piehole import run_git, etcd_read, etcd_write, GitFailure, BLANK, \
                     invoke_daemon, reporef
 
+TEST_REPO_COUNT = 3
+
 class RunError(Exception):
     pass
 
@@ -60,6 +62,10 @@ class TemporaryGitRepo:
     def run_git(self, *args):
         with in_directory(self.root):
             return run_git(*args)
+
+    def run(self, command):
+        with in_directory(self.root):
+            return run(command)
 
     @property
     def url(self):
@@ -109,6 +115,9 @@ class TemporaryGitRepo:
         with in_directory(self):
             return reporef(ref)
 
+    def register(self):
+        self.run("piehole.py check")
+
 
 class TemporaryEtcdServer:
     def __init__ (self):
@@ -128,14 +137,17 @@ class TemporaryPieholeDaemon:
         self.returncode = None
         self.root = tempfile.mkdtemp()
         self.logfile = os.path.join(self.root, 'piehole.log')
+        count = 0
         while True:
             try:
+                count += 1
                 self.daemon = subprocess.Popen(["piehole.py", "daemon", "--logfile=%s" % self.logfile])
-                run("curl --connect-timeout 1 -s -d action=ping http://localhost:3690")
+                run("curl --connect-timeout 2 -s -d action=ping http://localhost:3690")
                 break
-            except RunError:
-                pass
-        assert None == self.daemon.poll()
+            except:
+                if count >= 5:
+                    raise
+                time.sleep(1)
 
     def cleanup(self):
         if self.returncode is None:
@@ -150,6 +162,10 @@ class TemporaryPieholeDaemon:
 
 
 class PieholeTest(unittest.TestCase):
+    def __init__(self, methodname):
+        super(PieholeTest, self).__init__(methodname)
+        self.repos = []
+
     @classmethod
     def setUpClass(cls):
         cls.etcd = TemporaryEtcdServer()
@@ -158,27 +174,46 @@ class PieholeTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.etcd.cleanup()
 
+    def get_repo(self, i):
+        try:
+            return self.repos[i]
+        except IndexError:
+            newrepo = TemporaryGitRepo('--bare')
+            with in_directory(newrepo):
+                run("piehole.py install --repogroup=%s" % self.repogroup)
+            self.repos.append(newrepo)
+            return self.get_repo(i)
+
+    def register(self, omit=None):
+        for repo in self.repos:
+            if repo is omit:
+                continue
+            repo.register()
+
+    @property
+    def repoa(self):
+        return self.get_repo(0)
+
+    @property
+    def repob(self):
+        return self.get_repo(TEST_REPO_COUNT -1)
+
     def setUp(self):
         self.repogroup = uuid.uuid4().hex
         os.environ['PATH'] = "%s:%s" % (os.getcwd(), os.environ['PATH'])
         shutil.rmtree('__pycache__', ignore_errors=True)
         self.pieholed = TemporaryPieholeDaemon()
-
-        self.repoa = TemporaryGitRepo("--bare")
-        self.repob = TemporaryGitRepo("--bare")
         self.workrepo = TemporaryGitRepo()
         self.workrepo.add_remote(self.repoa, "a")
         self.workrepo.add_remote(self.repob, "b")
-        with in_directory(self.repoa):
-            run("piehole.py install --repogroup=%s" % self.repogroup)
         with in_directory(self.repob):
             run("piehole.py install --repogroup=%s" % self.repogroup)
 
     def tearDown(self):
         self.pieholed.cleanup()
-        self.repoa.cleanup()
-        self.repob.cleanup()
         self.workrepo.cleanup()
+        while self.repos:
+            self.repos.pop().cleanup()
 
     def current_ref(self, ref='refs/heads/master'):
         with in_directory(self.repoa):
@@ -193,14 +228,17 @@ class PieholeTest(unittest.TestCase):
                         break
 
     def wait_for_replication(self, ref='refs/heads/master'):
-        for i in range(10):
-            if self.current_ref(ref) == \
-               self.repoa.reporef(ref) == \
-               self.repob.reporef(ref):
-                return True
+        failtime = time.time() + 10
+        while time.time() < failtime:
+            target = self.current_ref(ref)
+            for repo in self.repos:
+                if repo.reporef(ref) != target:
+                    time.sleep(0.1)
+                    break
             else:
-                time.sleep(0.25)
-        raise AssertionError("failed to replicate %s %s %s" % (self.current_ref(ref), self.repoa.reporef(ref), self.repob.reporef(ref)))
+                return True
+        repostat = [ "%s:%s" % (r.root, r.reporef(ref)) for r in self.repos ]
+        raise AssertionError("failed to replicate %s %s " % (self.current_ref(ref), repostat))
 
     def commit(self, repo):
         repo.commit()
@@ -250,13 +288,16 @@ class PieholeTest(unittest.TestCase):
             self.workrepo.commit()
             self.workrepo.push('a')
         self.wait_for_replication()
+        self.assertIn('Transferring refs/heads/master', self.pieholed.log())
 
     def test_register(self):
         "Drop repo b's URL from etcd and see that it can re-register itself"
         self.workrepo.commit()
         self.workrepo.push('a')
+        self.wait_for_replication()
         with in_directory(self.repoa):
             etcd_write(self.repogroup, self.repoa.url)
+        self.register(omit=self.repob)
         self.workrepo.commit()
         self.workrepo.repeat_push('b')
         self.workrepo.commit()
@@ -268,6 +309,7 @@ class PieholeTest(unittest.TestCase):
             etcd_write(self.repogroup, self.repoa.url)
         with in_directory(self.repob):
             run("git config piehole.repourl git+ssh://localhost%s" % self.repob.root)
+        self.register()
         self.workrepo.commit()
         self.workrepo.repeat_push('b')
         for i in range(2):
