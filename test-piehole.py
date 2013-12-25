@@ -4,6 +4,7 @@
 import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -15,7 +16,7 @@ import uuid
 
 sys.path.append('.')
 from piehole import run_git, etcd_read, etcd_write, GitFailure, BLANK, \
-                    invoke_daemon, reporef
+                    invoke_daemon, reporef, DAEMON_PORT
 
 TEST_REPO_COUNT = 3
 
@@ -133,25 +134,20 @@ class TemporaryEtcdServer:
 
 
 class TemporaryPieholeDaemon:
-    def __init__ (self):
+    def __init__(self):
         self.returncode = None
         self.root = tempfile.mkdtemp()
         self.logfile = os.path.join(self.root, 'piehole.log')
         count = 0
-        while True:
-            try:
-                count += 1
-                self.daemon = subprocess.Popen(["piehole.py", "daemon", "--logfile=%s" % self.logfile])
-                run("curl --connect-timeout 2 -s -d action=ping http://localhost:3690")
-                break
-            except:
-                if count >= 5:
-                    raise
-                time.sleep(1)
-
+        self.daemon = subprocess.Popen(["piehole.py", "daemon", "--logfile=%s" % self.logfile])
+        run("curl --connect-timeout 2 -s -d action=ping http://localhost:%d" % DAEMON_PORT)
+        if self.daemon.poll() is None:
+            return
+        raise RuntimeError("Failed to start daemon")
+   
     def cleanup(self):
-        if self.returncode is None:
-            self.daemon.terminate()
+        while self.returncode is None:
+            os.killpg(self.daemon.pid, signal.SIGKILL)
             self.returncode = self.daemon.wait()
             cleanup_directory(self.root)
 
@@ -226,7 +222,7 @@ class PieholeTest(unittest.TestCase):
                         break
 
     def wait_for_replication(self, ref='refs/heads/master'):
-        failtime = time.time() + 10
+        failtime = time.time() + 10 + len(self.repos)
         while time.time() < failtime:
             target = self.current_ref(ref)
             for repo in self.repos:
@@ -286,7 +282,6 @@ class PieholeTest(unittest.TestCase):
             self.workrepo.commit()
             self.workrepo.push('a')
         self.wait_for_replication()
-        self.assertIn('Transferring refs/heads/master', self.pieholed.log())
 
     def test_register(self):
         "Drop repo b's URL from etcd and see that it can re-register itself"
@@ -365,12 +360,6 @@ class PieholeTest(unittest.TestCase):
             run("piehole.py clobber")
         self.workrepo.push('a')
         self.wait_for_replication()
-
-    def test_reporef(self):
-        self.workrepo.commit()
-        self.workrepo.run_git('tag', 'fun')
-        self.assertEqual(self.workrepo.reporef(),
-                         self.workrepo.reporef('refs/tags/fun'))
 
     def test_tag(self):
         "Replicate a tag."

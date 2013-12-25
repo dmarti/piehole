@@ -110,9 +110,10 @@ class TransferRequestHandler(http.server.BaseHTTPRequestHandler):
 
 def start_daemon(logpath):
     serveraddr = ('127.0.0.1', DAEMON_PORT)
-    log('', to=logpath)
     try:
+        os.setsid()
         daemon = ForkingHTTPServer(serveraddr, TransferRequestHandler)
+        log('', to=logpath)
     except OSError as err:
         if 98 == err.errno:
             fail(str(err))
